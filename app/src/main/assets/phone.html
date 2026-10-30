@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>TVCouchBrowser</title>
+<style>
+  :root { color-scheme: dark; --bg:#101318; --card:#1b2230; --accent:#4DA3FF; --text:#e8eef5; --dim:#9fb3c8; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin:0; background:var(--bg); color:var(--text); font:17px -apple-system, system-ui, sans-serif; }
+  header { padding:16px 18px 4px; font-weight:700; font-size:20px; }
+  section { background:var(--card); margin:12px; padding:14px; border-radius:16px; }
+  h2 { margin:0 0 10px; font-size:15px; color:var(--dim); text-transform:uppercase; letter-spacing:.05em; }
+  input, textarea { width:100%; font:inherit; color:var(--text); background:#0c0f14; border:1px solid #2c3647;
+    border-radius:12px; padding:12px; }
+  textarea { height:84px; resize:none; }
+  .row { display:flex; gap:8px; margin-top:10px; }
+  button { flex:1; font:inherit; font-weight:600; color:var(--text); background:#2a3446; border:0; border-radius:12px;
+    padding:14px 8px; }
+  button.primary { background:var(--accent); color:#06121f; }
+  button:active { filter:brightness(1.3); }
+  .pad { display:grid; grid-template-columns:repeat(3, 1fr); gap:8px; max-width:330px; margin:0 auto; }
+  .pad button { padding:22px 0; font-size:22px; }
+  .pad .ok { background:var(--accent); color:#06121f; border-radius:50%; aspect-ratio:1; }
+  #live { display:flex; align-items:center; gap:8px; margin-top:10px; color:var(--dim); font-size:15px; }
+  #live input { width:auto; }
+  #status { position:fixed; left:50%; bottom:20px; transform:translateX(-50%); background:#000c; padding:8px 16px;
+    border-radius:20px; opacity:0; transition:opacity .2s; pointer-events:none; }
+</style>
+</head>
+<body>
+<header>TVCouchBrowser</header>
+
+<section>
+  <h2>Open on TV</h2>
+  <input id="url" type="url" inputmode="url" autocapitalize="off" autocorrect="off" placeholder="Website or search">
+  <div class="row"><button class="primary" id="open">Open</button></div>
+</section>
+
+<section>
+  <h2>Type into the TV</h2>
+  <textarea id="text" placeholder="Select a text box on the TV, then type here" autocapitalize="off"></textarea>
+  <label id="live"><input type="checkbox" id="liveBox"> Send as I type</label>
+  <div class="row">
+    <button class="primary" id="send">Send</button>
+    <button id="enter">Enter ⏎</button>
+    <button id="bksp">⌫</button>
+  </div>
+</section>
+
+<section>
+  <h2>Remote</h2>
+  <div class="pad">
+    <button data-k="back">↩</button><button data-k="up">▲</button><button data-k="menu">☰</button>
+    <button data-k="left">◀</button><button data-k="ok" class="ok">OK</button><button data-k="right">▶</button>
+    <button data-k="playpause">⏯</button><button data-k="down">▼</button><button data-k="mode">⇄</button>
+  </div>
+</section>
+
+<div id="status"></div>
+
+<script>
+  const token = new URLSearchParams(location.search).get('t') || '';
+  const $ = (id) => document.getElementById(id);
+  let statusTimer;
+  const status = (msg) => {
+    const s = $('status'); s.textContent = msg; s.style.opacity = 1;
+    clearTimeout(statusTimer); statusTimer = setTimeout(() => s.style.opacity = 0, 1400);
+  };
+  const post = async (path, body) => {
+    try {
+      const r = await fetch(path + (path.includes('?') ? '&' : '?') + 't=' + encodeURIComponent(token), {
+        method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: body || '' });
+      if (r.status === 403) { status('Link expired: scan the QR code again'); return false; }
+      if (!r.ok) { status('The TV said no'); return false; }
+      return true;
+    } catch (e) { status('TV not reachable: is the browser open?'); return false; }
+  };
+
+  $('open').onclick = async () => {
+    const v = $('url').value.trim(); if (!v) return;
+    if (await post('/open', v)) { status('Opened on TV'); $('url').value = ''; }
+  };
+  $('url').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('open').click(); });
+
+  let sent = '';
+  $('send').onclick = async () => {
+    const v = $('text').value; if (!v) return;
+    if (await post('/type', v)) { status('Sent'); $('text').value = ''; sent = ''; }
+  };
+  // Live mode sends only what was added at the end, and backspaces for what was deleted.
+  $('text').addEventListener('input', async () => {
+    if (!$('liveBox').checked) return;
+    const v = $('text').value;
+    let common = 0;
+    while (common < v.length && common < sent.length && v[common] === sent[common]) common++;
+    const removed = sent.length - common; const added = v.slice(common);
+    sent = v;
+    for (let i = 0; i < removed; i++) await post('/key?k=backspace');
+    if (added) await post('/type', added);
+  });
+  $('liveBox').onchange = () => { sent = $('text').value = ''; };
+  $('enter').onclick = () => post('/key?k=enter').then((ok) => { if (ok) { $('text').value = ''; sent = ''; } });
+  $('bksp').onclick = () => post('/key?k=backspace');
+  for (const b of document.querySelectorAll('[data-k]')) b.onclick = () => post('/key?k=' + b.dataset.k);
+</script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+TVCouchBrowser
+==============
+
+TVCouchBrowser is released under the MIT License (see LICENSE). Copyright (c) 2026 crash101g.
+
+This app uses the system Android System WebView (Chromium) that is already installed on the TV;
+no browser engine is bundled.
+
+Bundled third-party code
+- AndroidX WebKit (androidx.webkit), Apache License 2.0, https://developer.android.com/jetpack/androidx/releases/webkit
+- ZXing core (QR code generation), Apache License 2.0, https://github.com/zxing/zxing
+
+Filter lists (downloaded by the app at run time from their publishers, not bundled)
+- EasyList and EasyPrivacy, https://easylist.to/ , dual licensed GPL-3.0-or-later and CC BY-SA 3.0
+- uBlock Origin filters and uBlock filters – Privacy, https://github.com/uBlockOrigin/uAssets , GPL-3.0
+
+The blocking engine in AdBlocker.kt is an original, simplified implementation of the Adblock Plus /
+uBlock Origin filter syntax. It is not uBlock Origin and does not contain uBlock Origin code.

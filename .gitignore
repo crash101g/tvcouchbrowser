@@ -1,0 +1,8 @@
+.gradle/
+build/
+local.properties
+*.jks
+*.keystore
+keystore.properties
+dist/
+.restore-sleep-timeout.txt
