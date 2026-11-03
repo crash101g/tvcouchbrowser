@@ -32,6 +32,9 @@ import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.webkit.CookieManager
+import android.webkit.GeolocationPermissions
+import android.webkit.JsPromptResult
+import android.webkit.JsResult
 import android.webkit.PermissionRequest
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
@@ -48,6 +51,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import com.google.zxing.BarcodeFormat
@@ -67,6 +71,7 @@ class BrowserActivity : Activity(), PhoneServer.Actions {
         @Volatile var pageHost: String? = null
         @Volatile var blocked = 0
         var favicon: Bitmap? = null
+        var jsDialogs = 0 // alert/confirm/prompt shown by the current page
     }
 
     private lateinit var prefs: android.content.SharedPreferences
@@ -131,6 +136,22 @@ class BrowserActivity : Activity(), PhoneServer.Actions {
     override fun onStart() {
         super.onStart()
         server.start()
+        scheduleListUpdate()
+    }
+
+    // Filter lists update once a day. Launch handles a stale set; this covers a TV left on the
+    // browser for days: the next update is due a day after the last one.
+    private val listUpdate: Runnable = object : Runnable {
+        override fun run() {
+            blocker.updateIfStale { msg -> Log.i(TAG, "filter lists: $msg") }
+            ui.postDelayed(this, AdBlocker.MAX_AGE_MS) // a failed update waits a day too
+        }
+    }
+
+    private fun scheduleListUpdate() {
+        ui.removeCallbacks(listUpdate)
+        val due = blocker.lastUpdated + AdBlocker.MAX_AGE_MS - System.currentTimeMillis()
+        ui.postDelayed(listUpdate, due.coerceIn(60_000L, AdBlocker.MAX_AGE_MS))
     }
 
     override fun onResume() {
@@ -145,6 +166,7 @@ class BrowserActivity : Activity(), PhoneServer.Actions {
     }
 
     override fun onStop() {
+        ui.removeCallbacks(listUpdate)
         server.stop()
         super.onStop()
     }
@@ -264,6 +286,7 @@ class BrowserActivity : Activity(), PhoneServer.Actions {
         menuGrid = GridLayout(this).apply { columnCount = 5 }
         menu = FrameLayout(this).apply {
             setBackgroundColor(0xDD000000.toInt())
+            isClickable = true // a phone-trackpad tap on the backdrop must not reach the page behind it
             addView(menuGrid, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
             visibility = View.GONE
         }
@@ -377,6 +400,11 @@ class BrowserActivity : Activity(), PhoneServer.Actions {
             mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
         }
         CookieManager.getInstance().setAcceptThirdPartyCookies(web, false)
+        // Don't tell every site this is an app's WebView (the X-Requested-With header): sites and
+        // captchas treat WebViews with extra suspicion.
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.REQUESTED_WITH_HEADER_ALLOW_LIST)) {
+            WebSettingsCompat.setRequestedWithHeaderOriginAllowList(web.settings, emptySet())
+        }
         web.isFocusable = true
         web.addJavascriptInterface(PageBridge(blocker) { playing -> ui.post { keepScreenOn(playing) } }, "TVCB")
         if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
@@ -399,6 +427,13 @@ class BrowserActivity : Activity(), PhoneServer.Actions {
         override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
             val scheme = request.url.scheme?.lowercase()
             if (scheme == "http" || scheme == "https") {
+                // A page sending itself to an ad or tracker domain without a click: a forced redirect.
+                if (request.isForMainFrame && !request.hasGesture() && blocker.enabled && !blocker.isAllowlisted(t.pageHost) &&
+                    t.pageHost != null && blocker.shouldBlock(request.url, t.pageHost)) {
+                    Log.i(TAG, "blocked redirect to ${request.url}")
+                    toast("Blocked a redirect to ${request.url.host}")
+                    return true
+                }
                 if (request.isForMainFrame && applyUserAgent(view, request.url.toString())) {
                     view.loadUrl(request.url.toString()); return true
                 }
@@ -411,12 +446,17 @@ class BrowserActivity : Activity(), PhoneServer.Actions {
         override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
             t.pageHost = Uri.parse(url).host
             t.blocked = 0
+            t.jsDialogs = 0
             t.url = url
         }
 
         override fun onPageFinished(view: WebView, url: String) {
             t.url = url
             saveTabs() // the process can be killed without onPause (low memory, reinstall)
+            if (t === tab && isAutoClean(t.pageHost)) {
+                cleanUpPage(quiet = true)
+                ui.postDelayed({ if (t === tab) cleanUpPage(quiet = true) }, 3000) // late pop-ups
+            }
         }
 
         override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
@@ -455,13 +495,47 @@ class BrowserActivity : Activity(), PhoneServer.Actions {
             if (drm.isNotEmpty()) request.grant(drm.toTypedArray()) else request.deny()
         }
 
+        // A page gets two alert/confirm/prompt dialogs; after that they are dismissed unseen, so a
+        // dialog loop can't trap the remote.
+        private fun tooManyDialogs(): Boolean {
+            if (++t.jsDialogs <= MAX_JS_DIALOGS) return false
+            if (t.jsDialogs == MAX_JS_DIALOGS + 1) ui.post { toast("Blocked more pop-up messages from this page") }
+            return true
+        }
+
+        override fun onJsAlert(view: WebView, url: String?, message: String?, result: JsResult): Boolean {
+            if (tooManyDialogs()) { result.cancel(); return true }
+            return false
+        }
+
+        override fun onJsConfirm(view: WebView, url: String?, message: String?, result: JsResult): Boolean {
+            if (tooManyDialogs()) { result.cancel(); return true }
+            return false
+        }
+
+        override fun onJsPrompt(view: WebView, url: String?, message: String?, defaultValue: String?, result: JsPromptResult): Boolean {
+            if (tooManyDialogs()) { result.cancel(); return true }
+            return false
+        }
+
+        // "Are you sure you want to leave?" never traps Back.
+        override fun onJsBeforeUnload(view: WebView, url: String?, message: String?, result: JsResult): Boolean {
+            result.confirm(); return true
+        }
+
+        override fun onGeolocationPermissionsShowPrompt(origin: String?, callback: GeolocationPermissions.Callback) {
+            callback.invoke(origin, false, false)
+        }
+
         override fun onCreateWindow(view: WebView, isDialog: Boolean, isUserGesture: Boolean, resultMsg: android.os.Message): Boolean {
             if (!isUserGesture) return false // pop-ups and pop-unders
-            // A link with target=_blank: catch its URL with a throwaway WebView and open it in a tab.
+            // A link with target=_blank: catch its URL with a throwaway WebView, then decide.
             val catcher = WebView(this@BrowserActivity)
             catcher.webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(v: WebView, r: WebResourceRequest): Boolean {
-                    openInNewTab(r.url.toString()); v.destroy(); return true
+                    v.destroy()
+                    newWindow(t, r.url)
+                    return true
                 }
             }
             (resultMsg.obj as WebView.WebViewTransport).webView = catcher
@@ -495,6 +569,26 @@ class BrowserActivity : Activity(), PhoneServer.Actions {
     private fun openInNewTab(url: String) {
         if (tabs.size >= MAX_TABS) { load(url); toast("Opened here: ${MAX_TABS} tabs is the limit"); return }
         tabs.add(Tab(url)); showTab(tabs.size - 1)
+    }
+
+    /**
+     * A new window the page opened after a click. Same-site windows open in a tab. A window to a
+     * filtered ad domain is dropped. A window to another site is the click-anywhere pop-under trick
+     * as often as a real link, so it asks first.
+     */
+    private fun newWindow(from: Tab, url: Uri) {
+        val scheme = url.scheme?.lowercase()
+        if (scheme != "http" && scheme != "https") { toast("Blocked a pop-up"); return }
+        val page = from.pageHost
+        val active = blocker.enabled && !blocker.isAllowlisted(page)
+        if (active && blocker.shouldBlockPopup(url, page)) { toast("Blocked a pop-up ad"); return }
+        val host = url.host ?: return
+        if (!active || page == null || AdBlocker.site(host) == AdBlocker.site(page)) { openInNewTab(url.toString()); return }
+        showDialog("This page wants to open $host", listOf(
+            "Open it in a new tab" to { openInNewTab(url.toString()) },
+            "Open it here" to { load(url.toString()) },
+            "Block it" to { toast("Blocked a pop-up") },
+        ))
     }
 
     private fun closeTab(index: Int) {
@@ -534,7 +628,11 @@ class BrowserActivity : Activity(), PhoneServer.Actions {
 
     // ---- user agent ---------------------------------------------------------------------------
 
-    private val defaultUa by lazy { WebSettings.getDefaultUserAgent(this) }
+    // WebView's user agent says "; wv" and "Version/4.0", which some sites and captchas treat as a
+    // bot or refuse (Google sign-in). Without them it reads as ordinary Chrome for Android.
+    private val defaultUa by lazy {
+        WebSettings.getDefaultUserAgent(this).replace("; wv", "").replace(Regex("Version/[\\d.]+ "), "")
+    }
     private val desktopUa by lazy {
         val chrome = Regex("Chrome/[\\d.]+").find(defaultUa)?.value ?: "Chrome/140.0.0.0"
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) $chrome Safari/537.36"
@@ -666,10 +764,13 @@ class BrowserActivity : Activity(), PhoneServer.Actions {
     }
 
     private fun updateCursorVisibility() {
-        cursor.visibility = if (cursorMode && fullscreenView == null && startScreen.visibility != View.VISIBLE) View.VISIBLE else View.GONE
+        val phone = SystemClock.uptimeMillis() < trackpadUntil
+        cursor.visibility = if (phone || (cursorMode && fullscreenView == null && startScreen.visibility != View.VISIBLE &&
+                menu.visibility != View.VISIBLE)) View.VISIBLE else View.GONE
     }
 
     private fun click() {
+        if (zapNext) { zapNext = false; zap(); return }
         if (cursorMode) { tap(cursor.cx, cursor.cy); return }
         js("__tvcb.target()") { r ->
             val json = r.trim('"').replace("\\\"", "\"")
@@ -806,6 +907,11 @@ class BrowserActivity : Activity(), PhoneServer.Actions {
             Triple("Zoom in", "＋") { tab.web?.zoomIn() },
             Triple(if (desktop) "Desktop site: on" else "Desktop site: off", "🖥") { closeMenu(); toggleDesktop() },
             Triple("Ad blocking", "⛔") { closeMenu(); adBlockDialog() },
+            Triple("Clean up page", "🧹") { closeMenu(); cleanUpPage() },
+            Triple("Remove element", "✂") {
+                closeMenu(); zapNext = true
+                toast(if (cursorMode) "Point at it and press OK to remove it" else "Pick it with the arrows and press OK to remove it")
+            },
             Triple("Pair phone", "📱") { closeMenu(); pairDialog() },
             Triple("Settings", "⚙") { closeMenu(); settingsDialog() },
         )
@@ -866,9 +972,221 @@ class BrowserActivity : Activity(), PhoneServer.Actions {
         items.add((if (blocker.enabled) "Turn ad blocking off everywhere" else "Turn ad blocking on") to {
             blocker.enabled = !blocker.enabled; tab.web?.reload()
         })
+        if (host != null) {
+            val auto = isAutoClean(host)
+            items.add((if (auto) "Stop cleaning up $host automatically" else "Clean up $host automatically (overlays, cookie walls)") to {
+                setAutoClean(host, !auto); if (!auto) cleanUpPage()
+            })
+            val zaps = blocker.zapCount(host)
+            if (zaps > 0) items.add("Bring back $zaps removed element${if (zaps == 1) "" else "s"} on $host" to {
+                blocker.clearZaps(host); tab.web?.reload()
+            })
+        }
+        items.add("Filter lists…" to { filterListsDialog() })
         items.add("Update filter lists now" to { toast("Updating filter lists…"); blocker.updateNow { ui.post { toast(it) } } })
         val state = if (!blocker.enabled) "Off" else if (allowed) "Off for this site" else "On"
         showDialog("Ad blocking: $state · ${tab.blocked} blocked on this page · ${blocker.ruleCount} rules · lists updated $updated", items)
+    }
+
+    private fun filterListsDialog() {
+        val on = blocker.enabledLists()
+        val names = AdBlocker.LISTS.map { it.title }.toTypedArray()
+        val checked = BooleanArray(names.size) { AdBlocker.LISTS[it].file in on }
+        dialog?.dismiss()
+        dialog = AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("Filter lists (more lists use more memory)")
+            .setMultiChoiceItems(names, checked) { _, which, isChecked -> checked[which] = isChecked }
+            .setPositiveButton("Save") { _, _ ->
+                val chosen = AdBlocker.LISTS.filterIndexed { i, _ -> checked[i] }.map { it.file }.toSet()
+                if (chosen != on) {
+                    blocker.setEnabledLists(chosen)
+                    toast("Loading filter lists…")
+                    blocker.reload { ui.post { toast(it) } }
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    // ---- clean up and remove element --------------------------------------------------------------
+
+    private var zapNext = false
+
+    private fun autoCleanSites() = prefs.getStringSet("autoclean", emptySet())!!
+    private fun isAutoClean(host: String?) = host != null && AdBlocker.site(host) in autoCleanSites()
+    private fun setAutoClean(host: String, on: Boolean) {
+        val set = HashSet(autoCleanSites())
+        if (on) set.add(AdBlocker.site(host)) else set.remove(AdBlocker.site(host))
+        prefs.edit().putStringSet("autoclean", set).apply()
+    }
+
+    /** Removes full-screen overlays, cookie walls and sticky ad bars, and lets the page scroll again. */
+    private fun cleanUpPage(quiet: Boolean = false) {
+        if (!browsing) return
+        js("__tvcb.cleanup()") { r ->
+            val n = r.trim('"').toIntOrNull() ?: 0
+            if (!quiet) toast(if (n > 0) "Cleaned up the page" else "Nothing to clean up here")
+        }
+    }
+
+    /** Removes the element under the pointer (or the one with the ring in link mode) and remembers it for the site. */
+    private fun zap() {
+        if (!browsing) return
+        val web = tab.web ?: return
+        val host = tab.pageHost
+        val call = if (cursorMode || SystemClock.uptimeMillis() < trackpadUntil)
+            "__tvcb.zapAt(${cursor.cx / web.width.coerceAtLeast(1)},${cursor.cy / web.height.coerceAtLeast(1)})"
+        else "__tvcb.zapCurrent()"
+        js(call) { r ->
+            val sel = try { JSONArray("[$r]").optString(0) } catch (e: Exception) { "" }
+            when {
+                sel == "" -> toast("Nothing to remove there")
+                sel == "-" -> toast("Removed (this page only)")
+                host != null && blocker.addZap(host, sel) -> toast("Removed. Ad blocking → Bring back removed elements to undo")
+                else -> toast("Removed (this page only)")
+            }
+        }
+    }
+
+    // ---- phone trackpad -------------------------------------------------------------------------
+
+    private var trackpadUntil = 0L
+    private var dragging = false
+    private var dragDownTime = 0L
+    private var lastPadHover = 0L
+    private val hideTrackpadCursor = Runnable { updateCursorVisibility() }
+
+    override fun pointerConnected() { ui.post { toast("Phone trackpad connected") } }
+
+    override fun pointerDisconnected() { ui.post { endDrag() } }
+
+    override fun pointer(cmd: PointerProtocol.Command) { ui.post { onPointer(cmd) } }
+
+    /** Something native (menu, start screen, address bar) is on top of the page. */
+    private val overlayShown get() = menu.visibility == View.VISIBLE || startScreen.visibility == View.VISIBLE ||
+        addressBar.visibility == View.VISIBLE
+
+    private fun onPointer(cmd: PointerProtocol.Command) {
+        // Dialogs are separate windows: the trackpad's click works as OK there, and its moves as arrows.
+        val d = dialog
+        if (d?.isShowing == true) {
+            when (cmd.op) {
+                'c' -> { d.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_CENTER)); d.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DPAD_CENTER)) }
+                'm' -> dialogNudge(d, cmd.b)
+            }
+            return
+        }
+        trackpadUntil = SystemClock.uptimeMillis() + TRACKPAD_CURSOR_MS
+        ui.removeCallbacks(hideTrackpadCursor); ui.postDelayed(hideTrackpadCursor, TRACKPAD_CURSOR_MS + 50)
+        if (cursor.visibility != View.VISIBLE) { cursor.visibility = View.VISIBLE }
+        cursor.bringToFront()
+        when (cmd.op) {
+            'm' -> padMove(cmd.a * density * PAD_GAIN, cmd.b * density * PAD_GAIN)
+            's' -> padScroll(cmd.a, cmd.b)
+            'c' -> padTap()
+            '2' -> { padTap(); ui.postDelayed({ padTap() }, 90) }
+            'd' -> startDrag()
+            'u' -> endDrag()
+            'l' -> { if (overlayShown) nativeViewAt(cursor.cx, cursor.cy)?.performLongClick() else { startDrag(); ui.postDelayed({ endDrag() }, 700) } }
+            'z' -> tab.web?.takeIf { browsing && !overlayShown }?.zoomBy(if (cmd.a > 0) 1.25f else 0.8f)
+            'x' -> if (!overlayShown) zap()
+            'k' -> if (!overlayShown) cleanUpPage()
+        }
+    }
+
+    private var dialogAcc = 0f
+    private fun dialogNudge(d: AlertDialog, dy: Float) {
+        dialogAcc += dy
+        val step = 40f
+        while (dialogAcc > step || dialogAcc < -step) {
+            val code = if (dialogAcc > 0) KeyEvent.KEYCODE_DPAD_DOWN else KeyEvent.KEYCODE_DPAD_UP
+            dialogAcc += if (dialogAcc > 0) -step else step
+            d.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, code)); d.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, code))
+        }
+    }
+
+    private fun padMove(dx: Float, dy: Float) {
+        val nx = cursor.cx + dx; val ny = cursor.cy + dy
+        cursor.moveTo(nx, ny)
+        val now = SystemClock.uptimeMillis()
+        if (dragging) { touch(MotionEvent.ACTION_MOVE, dragDownTime); return }
+        if (overlayShown) return
+        // Pushing past an edge scrolls the page, as with the remote.
+        val w = cursor.width; val h = cursor.height
+        val sx = if (nx < 0 || nx >= w - 1) dx else 0f
+        val sy = if (ny < 0 || ny >= h - 1) dy else 0f
+        if ((sx != 0f || sy != 0f) && browsing) {
+            @Suppress("DEPRECATION") val css = 1f / maxOf(tab.web?.scale ?: 1f, 0.1f)
+            js("__tvcb.scrollAt(${cursor.cx / w},${cursor.cy / h},${(sx * 2 * css).toInt()},${(sy * 2 * css).toInt()})")
+        }
+        if (browsing && now - lastPadHover > 50) { lastPadHover = now; hover(cursor.cx, cursor.cy) }
+    }
+
+    private fun padScroll(dx: Float, dy: Float) {
+        if (startScreen.visibility == View.VISIBLE && menu.visibility != View.VISIBLE) {
+            startScreen.scrollBy(0, (dy * density * PAD_SCROLL_GAIN).toInt()); return
+        }
+        if (!browsing || overlayShown) return
+        val w = cursor.width.coerceAtLeast(1); val h = cursor.height.coerceAtLeast(1)
+        js("__tvcb.scrollAt(${cursor.cx / w},${cursor.cy / h},${(dx * PAD_SCROLL_GAIN).toInt()},${(dy * PAD_SCROLL_GAIN).toInt()})")
+    }
+
+    /** A click from the trackpad: a real touch on the page, or a click on the native tile under the pointer. */
+    private fun padTap() {
+        if (zapNext) { zapNext = false; zap(); return }
+        if (overlayShown) {
+            val v = nativeViewAt(cursor.cx, cursor.cy)
+            if (v != null) { v.requestFocus(); v.performClick() }
+            else if (menu.visibility == View.VISIBLE) closeMenu() // a tap beside the menu closes it
+            return
+        }
+        val t = SystemClock.uptimeMillis()
+        touch(MotionEvent.ACTION_DOWN, t)
+        ui.postDelayed({ touch(MotionEvent.ACTION_UP, t) }, 40)
+    }
+
+    private fun startDrag() {
+        if (dragging || overlayShown) return
+        dragging = true; dragDownTime = SystemClock.uptimeMillis()
+        touch(MotionEvent.ACTION_DOWN, dragDownTime)
+    }
+
+    private fun endDrag() {
+        if (!dragging) return
+        dragging = false
+        touch(MotionEvent.ACTION_UP, dragDownTime)
+    }
+
+    /**
+     * A real touch event at the pointer, sent through the window's view tree so it reaches whatever
+     * is on top: the page, or the full-screen video. Pages see trusted events, which captcha
+     * checkboxes and press-and-hold buttons require.
+     */
+    private fun touch(action: Int, downTime: Long) {
+        val ev = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), action, cursor.cx, cursor.cy, 0)
+            .apply { source = InputDevice.SOURCE_TOUCHSCREEN }
+        root.dispatchTouchEvent(ev); ev.recycle()
+    }
+
+    /** The clickable native view (menu tile, bookmark, address field) under a point in root coordinates. */
+    private fun nativeViewAt(x: Float, y: Float): View? {
+        val top: ViewGroup = when {
+            menu.visibility == View.VISIBLE -> menu
+            addressBar.visibility == View.VISIBLE -> addressBar
+            startScreen.visibility == View.VISIBLE -> startScreen
+            else -> return null
+        }
+        val loc = IntArray(2); val rootLoc = IntArray(2)
+        root.getLocationOnScreen(rootLoc)
+        fun find(v: View): View? {
+            if (v.visibility != View.VISIBLE) return null
+            v.getLocationOnScreen(loc)
+            val lx = x + rootLoc[0] - loc[0]; val ly = y + rootLoc[1] - loc[1]
+            if (lx < 0 || ly < 0 || lx >= v.width || ly >= v.height) return null
+            if (v is ViewGroup) for (i in v.childCount - 1 downTo 0) find(v.getChildAt(i))?.let { return it }
+            return if (v !== top && (v.isClickable || v is EditText)) v else null
+        }
+        return find(top)
     }
 
     private fun settingsDialog() {
@@ -1008,6 +1326,10 @@ class BrowserActivity : Activity(), PhoneServer.Actions {
     companion object {
         private const val TAG = "TVCouchBrowser"
         const val MAX_TABS = 3
+        private const val MAX_JS_DIALOGS = 2
+        private const val TRACKPAD_CURSOR_MS = 5000L // the pointer stays up this long after the last trackpad use
+        private const val PAD_GAIN = 1f // TV dp per phone px, before the phone's own sensitivity setting
+        private const val PAD_SCROLL_GAIN = 2.5f
         private val DIRS = arrayOf("up", "down", "left", "right")
         private val SEARCH_ENGINES = listOf(
             "DuckDuckGo" to "https://duckduckgo.com/?q=",

@@ -18,6 +18,7 @@ import java.net.SocketException
 import java.net.URLDecoder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * The small HTTP server behind the phone page. It runs only while the browser is in the foreground.
@@ -33,10 +34,19 @@ class PhoneServer(
         fun openUrl(input: String): Boolean
         fun type(text: String)
         fun key(name: String): Boolean
+        /** A trackpad command from the phone; called on a server thread. */
+        fun pointer(cmd: PointerProtocol.Command)
+        /** Called once per trackpad connection, on a server thread. */
+        fun pointerConnected()
+        /** The trackpad connection closed; release anything it was holding down. */
+        fun pointerDisconnected()
     }
 
     private var server: ServerSocket? = null
-    private var pool = Executors.newFixedThreadPool(3)
+    // Each trackpad connection holds a thread for as long as it is open, so leave room for requests.
+    private var pool = Executors.newFixedThreadPool(POOL_SIZE)
+    private val sockets = AtomicInteger(0)
+    private val openSockets: MutableSet<Socket> = ConcurrentHashMap.newKeySet()
     private val failures = ConcurrentHashMap<String, Failures>()
     private var nsdListener: NsdManager.RegistrationListener? = null
 
@@ -48,7 +58,7 @@ class PhoneServer(
 
     fun start() {
         if (server != null) return
-        if (pool.isShutdown) pool = Executors.newFixedThreadPool(3)
+        if (pool.isShutdown) pool = Executors.newFixedThreadPool(POOL_SIZE)
         val socket = PORTS.firstNotNullOfOrNull { p ->
             try { ServerSocket(p, 8) } catch (e: Exception) { null }
         } ?: return
@@ -61,6 +71,9 @@ class PhoneServer(
     fun stop() {
         server?.close()
         server = null
+        // Blocking socket reads ignore interrupts, so close the trackpad connections directly.
+        openSockets.forEach { try { it.close() } catch (_: Exception) {} }
+        openSockets.clear()
         pool.shutdownNow()
         nsdListener?.let { l ->
             try { (context.getSystemService(Context.NSD_SERVICE) as NsdManager).unregisterService(l) } catch (_: Exception) {}
@@ -121,8 +134,10 @@ class PhoneServer(
         failures.remove(ip)
 
         when {
+            req.method == "GET" && req.path == "/ws" -> webSocket(s, req)
             req.method == "GET" && req.path == "/" ->
-                respond(s, 200, "text/html; charset=utf-8", context.assets.open("phone.html").use { String(it.readBytes()) })
+                respond(s, 200, "text/html; charset=utf-8", context.assets.open("phone.html").use { String(it.readBytes()) },
+                    wsHost = req.headers["host"])
             req.method == "POST" && req.path == "/open" -> {
                 val url = extract(req.body, "url")
                 if (url.isBlank() || url.length > 4096) return respond(s, 400, "text/plain", "No URL")
@@ -177,7 +192,60 @@ class PhoneServer(
         return true
     }
 
-    private class Request(val method: String, val path: String, val query: Map<String, String>, val body: String)
+    /**
+     * The trackpad: a WebSocket that stays open and carries small pointer commands. The token and LAN
+     * checks above have already passed. The Origin must be this server, so another site the phone
+     * has open can't drive the TV even if it learned the token.
+     */
+    private fun webSocket(s: Socket, req: Request) {
+        val host = req.headers["host"]
+        val origin = req.headers["origin"]
+        if (req.headers["upgrade"]?.lowercase() != "websocket" || req.headers["sec-websocket-version"] != "13" ||
+            (origin != null && host != null && origin != "http://$host")) {
+            return respond(s, 400, "text/plain", "Bad upgrade")
+        }
+        val accept = PointerProtocol.acceptKey(req.headers["sec-websocket-key"]) ?: return respond(s, 400, "text/plain", "Bad key")
+        if (sockets.incrementAndGet() > MAX_SOCKETS) {
+            sockets.decrementAndGet()
+            return respond(s, 429, "text/plain", "Too many trackpads connected")
+        }
+        openSockets.add(s)
+        try {
+            val out = s.getOutputStream()
+            out.write(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
+                "Sec-WebSocket-Accept: $accept\r\n\r\n").toByteArray())
+            out.flush()
+            s.soTimeout = 30_000 // the phone sends a keep-alive every 10 s
+            actions.pointerConnected()
+            val input = BufferedInputStream(s.getInputStream())
+            val limit = PointerProtocol.RateLimit(MAX_POINTER_RATE)
+            while (true) {
+                val f = try { PointerProtocol.readFrame(input) } catch (e: PointerProtocol.ProtocolException) {
+                    PointerProtocol.writeFrame(out, PointerProtocol.OP_CLOSE, PointerProtocol.closePayload(e.code)); return
+                } ?: return
+                when (f.opcode) {
+                    PointerProtocol.OP_CLOSE -> { PointerProtocol.writeFrame(out, PointerProtocol.OP_CLOSE, PointerProtocol.closePayload(1000)); return }
+                    PointerProtocol.OP_PING -> PointerProtocol.writeFrame(out, PointerProtocol.OP_PONG, f.payload)
+                    PointerProtocol.OP_TEXT -> {
+                        if (!limit.allow()) continue // a flood just drops messages
+                        val cmd = PointerProtocol.parse(String(f.payload, Charsets.UTF_8)) ?: continue
+                        if (cmd.op == 'p') PointerProtocol.writeFrame(out, PointerProtocol.OP_TEXT, "p".toByteArray())
+                        else actions.pointer(cmd)
+                    }
+                }
+            }
+        } catch (_: Exception) {
+            // timeout, reset or server stopping: the phone reconnects on its own
+        } finally {
+            actions.pointerDisconnected()
+            openSockets.remove(s)
+            sockets.decrementAndGet()
+        }
+    }
+
+    private class Request(
+        val method: String, val path: String, val query: Map<String, String>, val headers: Map<String, String>, val body: String,
+    )
 
     private fun readRequest(input: InputStream): Request? {
         val head = ByteArrayOutputStream()
@@ -204,7 +272,7 @@ class PhoneServer(
         val target = parts[1]
         val q = target.indexOf('?')
         val path = if (q >= 0) target.substring(0, q) else target
-        return Request(parts[0], path, if (q >= 0) parseQuery(target.substring(q + 1)) else emptyMap(), String(body, 0, read))
+        return Request(parts[0], path, if (q >= 0) parseQuery(target.substring(q + 1)) else emptyMap(), headers, String(body, 0, read))
     }
 
     private fun parseQuery(q: String): Map<String, String> = q.split('&').mapNotNull {
@@ -223,12 +291,14 @@ class PhoneServer(
     private fun respondJson(s: Socket, ok: Boolean) =
         respond(s, if (ok) 200 else 422, "application/json", if (ok) "{\"ok\":true}" else "{\"ok\":false}")
 
-    private fun respond(s: Socket, code: Int, type: String, body: String) {
+    private fun respond(s: Socket, code: Int, type: String, body: String, wsHost: String? = null) {
         val bytes = body.toByteArray()
+        // The phone page may open its trackpad socket back to this server, and nowhere else.
+        val connect = wsHost?.takeIf { HOST_HEADER.matches(it) }?.let { "; connect-src 'self' ws://$it" } ?: ""
         val reason = when (code) { 200 -> "OK"; 400 -> "Bad Request"; 403 -> "Forbidden"; 404 -> "Not Found"; 422 -> "Unprocessable"; else -> "Too Many Requests" }
         val head = "HTTP/1.1 $code $reason\r\nContent-Type: $type\r\nContent-Length: ${bytes.size}\r\n" +
             "Cache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\n" +
-            "Content-Security-Policy: default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'\r\n" +
+            "Content-Security-Policy: default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'$connect\r\n" +
             "Connection: close\r\n\r\n"
         try {
             s.getOutputStream().apply { write(head.toByteArray()); write(bytes); flush() }
@@ -239,6 +309,10 @@ class PhoneServer(
         private const val TAG = "PhoneServer"
         const val SERVICE_NAME = "TVCouchBrowser"
         val PORTS = listOf(8765, 8766, 8767, 8768)
+        private const val POOL_SIZE = 6
+        private const val MAX_SOCKETS = 2
+        private const val MAX_POINTER_RATE = 120 // messages a second per trackpad; more are dropped
+        private val HOST_HEADER = Regex("[A-Za-z0-9.\\-]+(:\\d{1,5})?|\\[[0-9A-Fa-f:.%]+](:\\d{1,5})?")
         private const val MAX_FAILURES = 5
         private const val FAIL_WINDOW_MS = 10 * 60_000L
         private const val BLOCK_MS = 10 * 60_000L

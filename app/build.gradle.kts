@@ -18,8 +18,8 @@ android {
         applicationId = "app.tvcouchbrowser"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
     }
 
     signingConfigs {
@@ -50,4 +50,5 @@ android {
 dependencies {
     implementation("androidx.webkit:webkit:1.18.0")
     implementation("com.google.zxing:core:3.5.4")
+    testImplementation("junit:junit:4.13.2")
 }

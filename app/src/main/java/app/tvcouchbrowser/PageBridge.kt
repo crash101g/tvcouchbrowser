@@ -17,7 +17,7 @@ class PageBridge(
     fun adblockOn(host: String): Boolean = active(host)
 
     @JavascriptInterface
-    fun cosmetic(host: String): String = if (active(host)) blocker.cosmeticCss(host) else ""
+    fun cosmetic(host: String, topFrame: Boolean): String = if (active(host)) blocker.cosmeticCss(host, topFrame) else ""
 
     @JavascriptInterface
     fun generic(host: String, tokensJson: String): String {

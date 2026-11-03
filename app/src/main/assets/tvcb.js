@@ -43,7 +43,7 @@
       s.textContent = css;
       (document.head || document.documentElement).appendChild(s);
     };
-    addCss(bridge.cosmetic(host));
+    addCss(bridge.cosmetic(host, top));
     const seen = new Set();
     let queued = [];
     const collect = (root) => {
@@ -254,6 +254,119 @@
     return 'ok';
   };
 
-  window.__tvcb = { nav, target, hideRing, scrollAt, media, exitFullscreen, type,
-    reset: () => { current = null; hideRing(); } };
+  // ---- clean up: overlays, cookie walls, sticky ad bars, scroll locks ----
+  const ANNOY = /(^|[-_\s])(ad|ads|advert|adsbox|banner|sponsor|promo|cookie|consent|gdpr|cmp|newsletter|subscribe|popup|pop-up|modal|overlay|interstitial|paywall|lightbox|backdrop)([-_\s]|$)/i;
+  const nameOf = (el) => (el.id || '') + ' ' + (typeof el.className === 'string' ? el.className : '');
+
+  const unlockScroll = () => {
+    let changed = false;
+    for (const el of [document.documentElement, document.body]) {
+      if (!el) continue;
+      const st = getComputedStyle(el);
+      if (st.overflow === 'hidden' || st.overflowY === 'hidden') {
+        el.style.setProperty('overflow', 'auto', 'important');
+        el.style.setProperty('overflow-y', 'auto', 'important');
+        changed = true;
+      }
+      if (el === document.body && st.position === 'fixed') {
+        // Sites lock scrolling by fixing the body at -scrollY; put it back where it was.
+        const y = -parseInt(el.style.top || '0', 10) || 0;
+        el.style.setProperty('position', 'static', 'important');
+        el.style.setProperty('top', 'auto', 'important');
+        if (y) window.scrollTo(0, y);
+        changed = true;
+      }
+    }
+    // Paywalls and cookie walls blur the article behind them.
+    for (const el of document.querySelectorAll('body, body > *, main, article')) {
+      const f = getComputedStyle(el).filter;
+      if (f && f.includes('blur')) { el.style.setProperty('filter', 'none', 'important'); changed = true; }
+    }
+    return changed;
+  };
+
+  const cleanup = () => {
+    let n = 0;
+    const vw = innerWidth; const vh = innerHeight;
+    const links = document.querySelectorAll('a[href]').length;
+    const fs = document.fullscreenElement;
+    for (const el of document.querySelectorAll('body *')) {
+      if (!el.isConnected) continue;
+      const st = getComputedStyle(el);
+      if (st.position !== 'fixed' && st.position !== 'sticky') continue;
+      if (fs && (el.contains(fs) || fs.contains(el))) continue;
+      if (el === ring) continue;
+      const r = el.getBoundingClientRect();
+      const w = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0));
+      const h = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
+      if (!w || !h) continue;
+      const cover = (w * h) / (vw * vh);
+      // Never take the page's own layout: something holding most of its links is the site itself.
+      const own = el.querySelectorAll('a[href]').length;
+      if (links > 20 && own > links * 0.5) continue;
+      const big = cover >= 0.3 && st.position === 'fixed';
+      const annoying = ANNOY.test(nameOf(el)) && own <= 8;
+      const adFrame = cover < 0.3 && own <= 3 && el.querySelector('iframe') && (r.top <= 0 || r.bottom >= vh - 1);
+      if (big || annoying || adFrame) { el.remove(); n++; }
+    }
+    if (unlockScroll()) n++;
+    return n;
+  };
+
+  // ---- remove element ("zap") and a selector to remember it by ----
+  const stableName = (x) => /^[A-Za-z_][\w-]{1,40}$/.test(x) && !/\d{4,}/.test(x) && !/^(css|sc|jsx|emotion)-/.test(x);
+
+  const selectorFor = (el) => {
+    const tag = el.tagName.toLowerCase();
+    let sel = '';
+    if (el.id && stableName(el.id)) sel = '#' + CSS.escape(el.id);
+    else if (tag === 'iframe' && el.src) {
+      try {
+        const u = new URL(el.src, location.href);
+        if (u.hostname && u.hostname !== location.hostname) sel = 'iframe[src*="' + u.hostname.replace(/"/g, '') + '"]';
+      } catch (e) { /* ignore */ }
+    }
+    if (!sel) {
+      const cls = [...el.classList].filter(stableName).slice(0, 3);
+      if (!cls.length) return '';
+      sel = tag + cls.map((c) => '.' + CSS.escape(c)).join('');
+      const p = el.parentElement;
+      if (p && p.id && stableName(p.id)) sel = '#' + CSS.escape(p.id) + ' > ' + sel;
+    }
+    // Only remember selectors that pick out this element and few others.
+    try {
+      const count = document.querySelectorAll(sel).length;
+      return count >= 1 && count <= 3 ? sel : '';
+    } catch (e) { return ''; }
+  };
+
+  const area = (e) => { const r = e.getBoundingClientRect(); return r.width * r.height; };
+
+  // Returns '' (nothing there), '-' (removed, not remembered) or the selector to remember.
+  const zapEl = (el) => {
+    if (!el || el === document.body || el === document.documentElement || el === ring) return '';
+    // Climb out of wrappers that are barely bigger than what was pointed at.
+    while (el.parentElement && el.parentElement !== document.body && el.parentElement !== document.documentElement &&
+      area(el.parentElement) <= area(el) * 1.25) el = el.parentElement;
+    const sel = selectorFor(el);
+    el.remove();
+    unlockScroll();
+    if (current && !current.isConnected) { current = null; hideRing(); }
+    return sel || '-';
+  };
+
+  const zapAt = (fx, fy) => {
+    if (ring) ring.style.display = 'none';
+    const el = document.elementFromPoint(fx * innerWidth, fy * innerHeight);
+    return zapEl(el);
+  };
+
+  const zapCurrent = () => (current && current.isConnected ? zapEl(current) : '');
+
+  // Not writable or extensible, so a page can't swap in its own versions of these.
+  const api = Object.freeze({ nav, target, hideRing, scrollAt, media, exitFullscreen, type, cleanup, zapAt, zapCurrent,
+    reset: () => { current = null; hideRing(); } });
+  try {
+    Object.defineProperty(window, '__tvcb', { value: api, writable: false, configurable: false });
+  } catch (e) { window.__tvcb = api; }
 })();
