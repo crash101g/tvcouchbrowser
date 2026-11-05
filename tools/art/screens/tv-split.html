@@ -1,0 +1,40 @@
+<!doctype html>
+<!-- A made-up news site: left half buried in ads, right half cleaned up. For the ad-blocking picture. -->
+<meta charset="utf-8">
+<style>
+  *{box-sizing:border-box;margin:0}
+  body{width:1920px;height:1080px;overflow:hidden;background:#000;font-family:"Fira Sans",sans-serif}
+  .page{position:absolute;inset:0;background:#f4f1ea;color:#16181d;padding:0 0 0 0}
+  .top{height:104px;background:#14233c;color:#fff;display:flex;align-items:center;padding:0 60px 0 1020px;font:800 52px "Noto Serif","DejaVu Serif",serif;letter-spacing:-1px}
+  .nav{height:52px;background:#fff;border-bottom:2px solid #d9d4c8;display:flex;gap:44px;align-items:center;padding:0 60px 0 1020px;font-size:24px;color:#3b4250}
+  .body{display:grid;grid-template-columns:1fr 1fr;gap:56px;padding:40px 60px}
+  h2{font:800 58px/1.08 "Noto Serif","DejaVu Serif",serif;letter-spacing:-1px;margin-bottom:22px}
+  .photo{height:340px;border-radius:12px;background:linear-gradient(160deg,#ffcf8a,#f08a5d 40%,#5a3d8a 75%,#16224a);position:relative;overflow:hidden;margin-bottom:22px}
+  .photo:after{content:"";position:absolute;left:-5%;right:-5%;bottom:-64px;height:150px;background:#120f24;border-radius:50%}
+  .t{font-size:28px;line-height:1.45;color:#3b4250}
+  .ads{position:absolute;inset:0;clip-path:polygon(0 0,50% 0,50% 100%,0 100%)}
+  .ad{position:absolute;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;font-weight:900;box-shadow:0 8px 40px #0008;border:6px solid #fff}
+  .a1{left:-20px;top:0;width:1000px;height:170px;background:repeating-linear-gradient(45deg,#ff2b4a 0 40px,#ffb400 40px 80px);color:#fff;font-size:76px;text-shadow:0 4px 0 #000}
+  .a2{left:60px;top:190px;width:480px;height:400px;background:#ffe600;color:#d4002a;font-size:70px;line-height:1.05}
+  .a3{left:560px;top:230px;width:420px;height:300px;background:linear-gradient(#7a00ff,#ff00aa);color:#fff;font-size:58px}
+  .a4{left:30px;top:620px;width:930px;height:250px;background:#111;color:#39ff6a;font-size:68px}
+  .a5{left:-10px;top:890px;width:1000px;height:200px;background:#ff5a00;color:#fff;font-size:70px}
+  .x{position:absolute;right:10px;top:4px;font-size:32px;opacity:.7}
+  .right{position:absolute;inset:0;clip-path:polygon(50% 0,100% 0,100% 100%,50% 100%)}
+  .scan{position:absolute;left:954px;top:0;width:12px;height:100%;background:#fff;box-shadow:0 0 30px 12px #4DA3FF,0 0 90px 30px #7A4FD1}
+</style>
+<div class="page">
+  <div class="top">The Evening Courier</div><div class="nav"><span>World</span><span>Local</span><span>Sport</span><span>Culture</span><span>Weather</span></div>
+  <div class="body">
+    <div><h2>Town votes to keep its old cinema open</h2></div>
+    <div><div class="photo"></div><h2>Long summer ahead, forecasters say</h2><div class="t">After a mild spring, the region can expect warm evenings well into September, with only a few short showers on the way. Farmers say the rain came at the right time, and the reservoirs are nearly full. The town fair goes ahead on the first weekend of August.</div></div>
+  </div>
+</div>
+<div class="ads">
+  <div class="ad a1"><span class="x">✕</span>!!! YOU WON !!! CLAIM NOW</div>
+  <div class="ad a2"><span class="x">✕</span>HOT<br>DEALS<br>90% OFF</div>
+  <div class="ad a3"><span class="x">✕</span>ONE WEIRD TRICK</div>
+  <div class="ad a4"><span class="x">✕</span>DOWNLOAD ▶ NOW<br>FREE FREE FREE</div>
+  <div class="ad a5"><span class="x">✕</span>AD · AD · AD · AD</div>
+</div>
+<div class="scan"></div>
