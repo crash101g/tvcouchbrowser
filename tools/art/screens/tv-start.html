@@ -1,0 +1,29 @@
+<!doctype html>
+<!-- The app's real start screen (BrowserActivity.showStart) redrawn at 960x540 dp, 2x. Sizes and colours match the code. -->
+<meta charset="utf-8">
+<style>
+  *{box-sizing:border-box;margin:0}
+  html{zoom:2}
+  body{width:960px;height:540px;background:#101318;color:#fff;font-family:"Fira Sans",sans-serif;display:flex;flex-direction:column;align-items:center;padding:24px 32px;overflow:hidden}
+  h1{font-size:22px;font-weight:400;color:#9FB3C8;padding-bottom:12px}
+  .search{width:880px;height:76px;margin:8px 8px 16px;background:#2A3446;border-radius:14px;display:flex;align-items:center;gap:14px;padding:0 24px;font-size:22px}
+  .grid{display:grid;grid-template-columns:repeat(4,208px);gap:16px}
+  .tile{height:150px;background:#1B2230;border-radius:14px;padding:8px;display:flex;flex-direction:column}
+  .tile.f{background:#2F7FE0;outline:3px solid #fff;transform:scale(1.08);z-index:1}
+  .tile i{flex:1;border-radius:8px;display:flex;align-items:center;justify-content:center;font-style:normal;font-size:44px}
+  .tile b{font-weight:400;font-size:16px;padding:6px 4px 0}
+  p{color:#6B7D92;font-size:14px;padding-top:14px}
+</style>
+<h1>TVCouchBrowser</h1>
+<div class="search"><span>🔍</span>Search or type a web address</div>
+<div class="grid">
+  <div class="tile f"><i style="background:#7A4FD1">V</i><b>Video</b></div>
+  <div class="tile"><i style="background:#2F7FE0">N</i><b>Evening News</b></div>
+  <div class="tile"><i style="background:#1F9D8B">W</i><b>Weather</b></div>
+  <div class="tile"><i style="background:#D1693A">R</i><b>Recipes</b></div>
+  <div class="tile"><i style="background:#B8417A">M</i><b>Movies</b></div>
+  <div class="tile"><i style="background:#1F9D8B">S</i><b>Sports</b></div>
+  <div class="tile"><i style="background:#7A4FD1">P</i><b>Podcasts</b></div>
+  <div class="tile"><i style="background:#2F7FE0">G</i><b>Gardening</b></div>
+</div>
+<p>Menu button (or hold Back): browser menu  ·  Hold OK on a tile: move or remove</p>
