@@ -30,6 +30,12 @@ Built and tested on a TCL 40Q3K (Google TV 14, 32-bit ARM, 1 GB RAM).
 - **Send to TV** from the iPhone share sheet: see [docs/send-to-tv-shortcut.md](docs/send-to-tv-shortcut.md).
 - Small: a ~160 KB APK, because it uses the Android System WebView already on the TV.
 
+> **Also available in Sofa:** the phone trackpad and remote, Clean up page, Remove element and the extra filter lists
+> are in [Sofa TV Browser + TVCouchBrowser features](https://github.com/crash101g/sofa-tv-browser), a fork of
+> [Sofa TV Browser](https://github.com/sonalder-darlene/sofa-tv-browser). Sofa adds its own video player with 4K and
+> HDR, game pad support, downloads and a home screen. It is about 2 MB and needs Android 7 or newer.
+> [Download it from its releases](https://github.com/crash101g/sofa-tv-browser/releases/latest).
+
 ## Why WebView and not Firefox's engine
 
 The plan was GeckoView with real uBlock Origin. On the 40Q3K it filled RAM and swap, and the TV's
